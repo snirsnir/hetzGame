@@ -1,0 +1,1012 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>משחק התאמת גדלים</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            touch-action: none;
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #score {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 36px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        #sound-toggle {
+            position: absolute;
+            top: 20px;
+            left: 30px;
+            width: 50px;
+            height: 50px;
+            cursor: pointer;
+            pointer-events: all;
+            background: rgba(255,255,255,0.3);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            transition: background 0.3s;
+        }
+
+        #sound-toggle:hover {
+            background: rgba(255,255,255,0.5);
+        }
+
+        #fireworks-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 20;
+            display: none;
+        }
+
+        #victory-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 72px;
+            font-weight: bold;
+            color: #FFD700;
+            text-shadow: 4px 4px 8px rgba(0,0,0,0.8);
+            display: none;
+            z-index: 25;
+            pointer-events: none;
+            animation: pulse 0.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.1); }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div id="ui-overlay">
+        <div id="score">ניקוד: 0/9</div>
+        <div id="sound-toggle">🔊</div>
+        <div id="victory-message">כל הכבוד! 🎉</div>
+    </div>
+
+    <canvas id="fireworks-canvas"></canvas>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // ============= GLOBAL VARIABLES =============
+        let scene, camera, renderer, raycaster;
+        let baskets = [];
+        let dropZones = [];
+        let objects = [];
+        let score = 0;
+        let soundEnabled = true;
+        let idleTimer;
+        let touches = new Map();
+        let mouseData = null; // For mouse drag
+        let correctSound, victorySound, errorSound;
+        let clock = new THREE.Clock();
+        let cameraOffset = { x: 0, y: 0 };
+
+        const TOTAL_OBJECTS = 9;
+        const IDLE_TIMEOUT = 120000; // 2 minutes
+        const VICTORY_DELAY = 5000; // 5 seconds
+
+        // Size levels
+        const SIZE = {
+            SMALL: 1,
+            MEDIUM: 2,
+            LARGE: 3
+        };
+
+        // ============= INIT =============
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb);
+
+            // Camera setup
+            camera = new THREE.PerspectiveCamera(
+                50,
+                window.innerWidth / window.innerHeight,
+                0.1,
+                1000
+            );
+            camera.position.set(0, 8, 15);
+            camera.lookAt(0, 0, 0);
+
+            // Save base camera position for animation
+            camera.userData.baseX = 0;
+            camera.userData.baseY = 8;
+            camera.userData.baseZ = 15;
+
+            // Renderer setup
+            const canvas = document.getElementById('gameCanvas');
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+
+            // Raycaster
+            raycaster = new THREE.Raycaster();
+
+            // Lighting
+            setupLighting();
+
+            // Audio
+            setupAudio();
+
+            // Load baskets
+            loadBaskets();
+
+            // Create objects
+            createObjects();
+
+            // Event listeners - Touch
+            canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+            canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+
+            // Event listeners - Mouse
+            canvas.addEventListener('mousedown', onMouseDown);
+            canvas.addEventListener('mousemove', onMouseMove);
+            canvas.addEventListener('mouseup', onMouseUp);
+
+            window.addEventListener('resize', onWindowResize);
+
+            document.getElementById('sound-toggle').addEventListener('click', toggleSound);
+
+            // Start idle timer
+            resetIdleTimer();
+
+            // Animation loop
+            animate();
+        }
+
+        // ============= LIGHTING =============
+        function setupLighting() {
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.5);
+            directionalLight1.position.set(5, 10, 5);
+            scene.add(directionalLight1);
+
+            const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.3);
+            directionalLight2.position.set(-5, 10, 5);
+            scene.add(directionalLight2);
+        }
+
+        // ============= AUDIO =============
+        function setupAudio() {
+            correctSound = new Audio('music/correct.mp3');
+            victorySound = new Audio('music/good.mp3');
+            errorSound = new Audio('music/error.mp3');
+
+            correctSound.preload = 'auto';
+            victorySound.preload = 'auto';
+            errorSound.preload = 'auto';
+        }
+
+        function playSound(sound) {
+            if (soundEnabled && sound) {
+                sound.currentTime = 0;
+                sound.play().catch(e => console.log('Audio play failed:', e));
+            }
+        }
+
+        function toggleSound() {
+            soundEnabled = !soundEnabled;
+            document.getElementById('sound-toggle').textContent = soundEnabled ? '🔊' : '🔇';
+        }
+
+        // ============= LOAD BASKETS =============
+        function loadBaskets() {
+            const loader = new GLTFLoader();
+            const scales = [2.8, 3.4, 4.0]; // הגדלנו פי 4
+            // שורה אחת: ריבוע|סל|ריבוע|סל|ריבוע|סל
+            const offset = 1.5; // הזזה קלה ימינה למרכוז
+            const basketPositions = [-9 + offset, 0 + offset, 9 + offset]; // מרחקים שווים + מרכוז
+            const greenPositions = [-13.5 + offset, -4.5 + offset, 4.5 + offset]; // 3 ריבועים ירוקים + מרכוז
+            const sizeLevels = [SIZE.SMALL, SIZE.MEDIUM, SIZE.LARGE];
+
+            // יצירת 3 ריבועים ירוקים קודם
+            greenPositions.forEach((x, index) => {
+                // כל ריבוע מקבל את רמת הגודל של הסל הקרוב אליו
+                const sizeLevel = index === 0 ? SIZE.SMALL : index === 1 ? SIZE.MEDIUM : SIZE.LARGE;
+                const scale = scales[index];
+                createComparisonZone(x, sizeLevel, scale);
+            });
+
+            scales.forEach((scale, index) => {
+                const x = basketPositions[index];
+
+                loader.load('models/basket.glb', (gltf) => {
+                    const basket = gltf.scene;
+                    basket.scale.set(scale, scale, scale);
+                    basket.position.set(x, 1.5, 0); // הורדנו מ-3 ל-1.5
+                    basket.userData.sizeLevel = sizeLevels[index];
+                    basket.userData.index = index;
+                    basket.userData.baseY = 1.5; // הורדנו מ-3 ל-1.5
+                    basket.userData.glowPhase = Math.random() * Math.PI * 2;
+
+                    // Add glow effect
+                    basket.traverse((child) => {
+                        if (child.isMesh) {
+                            child.material = child.material.clone();
+                            child.material.emissive = new THREE.Color(0xffdd99);
+                            child.material.emissiveIntensity = 0;
+                        }
+                    });
+
+                    baskets.push(basket);
+                    scene.add(basket);
+
+                    // איזור הסל עצמו
+                    createBasketDropZone(x, sizeLevels[index], scale, basket);
+                }, undefined, (error) => {
+                    console.error('Error loading basket:', error);
+                });
+            });
+        }
+
+        // ============= ZONES =============
+        // איזור השוואה - לצד הסל (ירוק, רק להשוואה - לא נותן ניקוד)
+        function createComparisonZone(x, sizeLevel, scale) {
+            const size = scale * 0.7; // גודל הריבוע יחסי לסל
+            const geometry = new THREE.PlaneGeometry(size, size);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0x44ff44,
+                transparent: true,
+                opacity: 0.5,
+                side: THREE.DoubleSide
+            });
+
+            const zone = new THREE.Mesh(geometry, material);
+            // באותו גובה כמו הסלים (Y=1.5)
+            zone.position.set(x, 1.5, 0);
+            zone.rotation.x = -Math.PI / 2;
+            zone.userData.sizeLevel = sizeLevel;
+            zone.userData.isComparisonZone = true;
+            zone.userData.defaultOpacity = 0.5;
+
+            // Add border
+            const edges = new THREE.EdgesGeometry(geometry);
+            const line = new THREE.LineSegments(
+                edges,
+                new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 3 })
+            );
+            zone.add(line);
+
+            dropZones.push(zone);
+            scene.add(zone);
+        }
+
+        // איזור הסל - איפה שהחפצים נבלעים (כמה אובייקטים שרוצים!)
+        function createBasketDropZone(x, sizeLevel, scale, basket) {
+            const size = scale * 0.5;
+            const geometry = new THREE.CircleGeometry(size, 32);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0xff0000,
+                transparent: true,
+                opacity: 0,
+                side: THREE.DoubleSide
+            });
+
+            const zone = new THREE.Mesh(geometry, material);
+            zone.position.set(x, 2, 0); // הורדנו מ-3.5 ל-2
+            zone.rotation.x = -Math.PI / 2;
+            zone.userData.sizeLevel = sizeLevel;
+            zone.userData.objectsInside = []; // מערך של אובייקטים במקום flag
+            zone.userData.isBasketZone = true;
+            zone.userData.basket = basket;
+
+            dropZones.push(zone);
+            scene.add(zone);
+        }
+
+        // ============= CREATE OBJECTS =============
+        function createObjects() {
+            const colors = {
+                sphere: 0xff6b6b,
+                box: 0x4ecdc4,
+                cone: 0xffd93d
+            };
+
+            const sizes = [
+                { scale: 0.5, level: SIZE.SMALL },
+                { scale: 0.75, level: SIZE.MEDIUM },
+                { scale: 1.0, level: SIZE.LARGE }
+            ];
+
+            // Create spheres
+            sizes.forEach((size, i) => {
+                const geometry = new THREE.SphereGeometry(0.6, 32, 32);
+                const material = new THREE.MeshStandardMaterial({
+                    color: colors.sphere,
+                    roughness: 0.5,
+                    metalness: 0.2
+                });
+                const sphere = new THREE.Mesh(geometry, material);
+                sphere.scale.setScalar(size.scale);
+                sphere.userData.sizeLevel = size.level;
+                sphere.userData.type = 'sphere';
+                sphere.userData.draggable = true;
+                sphere.userData.locked = false;
+                objects.push(sphere);
+                scene.add(sphere);
+            });
+
+            // Create boxes
+            sizes.forEach((size, i) => {
+                const geometry = new THREE.BoxGeometry(1, 1, 1);
+                const material = new THREE.MeshStandardMaterial({
+                    color: colors.box,
+                    roughness: 0.5,
+                    metalness: 0.2
+                });
+                const box = new THREE.Mesh(geometry, material);
+                box.scale.setScalar(size.scale);
+                box.userData.sizeLevel = size.level;
+                box.userData.type = 'box';
+                box.userData.draggable = true;
+                box.userData.locked = false;
+                objects.push(box);
+                scene.add(box);
+            });
+
+            // Create cones (pyramids)
+            sizes.forEach((size, i) => {
+                const geometry = new THREE.ConeGeometry(0.7, 1.2, 4);
+                const material = new THREE.MeshStandardMaterial({
+                    color: colors.cone,
+                    roughness: 0.5,
+                    metalness: 0.2
+                });
+                const cone = new THREE.Mesh(geometry, material);
+                cone.scale.setScalar(size.scale);
+                cone.userData.sizeLevel = size.level;
+                cone.userData.type = 'cone';
+                cone.userData.draggable = true;
+                cone.userData.locked = false;
+                objects.push(cone);
+                scene.add(cone);
+            });
+
+            // Randomize positions
+            randomizeObjectPositions();
+        }
+
+        function randomizeObjectPositions() {
+            const minY = -3;
+            const maxY = -1;
+            const minX = -8;
+            const maxX = 8;
+            const minZ = 2;
+            const maxZ = 4;
+
+            objects.forEach((obj) => {
+                let attempts = 0;
+                let validPosition = false;
+
+                while (!validPosition && attempts < 50) {
+                    const x = minX + Math.random() * (maxX - minX);
+                    const y = minY + Math.random() * (maxY - minY);
+                    const z = minZ + Math.random() * (maxZ - minZ);
+
+                    obj.position.set(x, y, z);
+
+                    // Check for overlaps
+                    validPosition = true;
+                    for (let other of objects) {
+                        if (other !== obj && obj.position.distanceTo(other.position) < 1.5) {
+                            validPosition = false;
+                            break;
+                        }
+                    }
+
+                    attempts++;
+                }
+
+                obj.userData.originalPosition = obj.position.clone();
+            });
+        }
+
+        // ============= TOUCH HANDLERS =============
+        function onTouchStart(event) {
+            event.preventDefault();
+            resetIdleTimer();
+
+            for (let touch of event.changedTouches) {
+                const touchPos = getTouchPosition(touch);
+                const intersects = getIntersects(touchPos);
+
+                for (let intersect of intersects) {
+                    const obj = intersect.object;
+                    // אם החפץ נעול (בתוך הסל) - אי אפשר לגרור
+                    if (obj.userData.draggable && !obj.userData.locked && obj.visible) {
+                        touches.set(touch.identifier, {
+                            object: obj,
+                            offset: intersect.point.sub(obj.position)
+                        });
+                        obj.scale.multiplyScalar(1.1);
+                        break;
+                    }
+                }
+            }
+        }
+
+        function onTouchMove(event) {
+            event.preventDefault();
+            resetIdleTimer();
+
+            for (let touch of event.changedTouches) {
+                const touchData = touches.get(touch.identifier);
+                if (touchData) {
+                    const touchPos = getTouchPosition(touch);
+                    const worldPos = screenToWorld(touchPos);
+
+                    if (worldPos) {
+                        touchData.object.position.x = worldPos.x - touchData.offset.x;
+                        touchData.object.position.y = worldPos.y - touchData.offset.y;
+                        touchData.object.position.z = worldPos.z - touchData.offset.z;
+
+                        // Highlight drop zones
+                        highlightNearbyZone(touchData.object);
+                    }
+                }
+            }
+        }
+
+        function onTouchEnd(event) {
+            event.preventDefault();
+            resetIdleTimer();
+
+            for (let touch of event.changedTouches) {
+                const touchData = touches.get(touch.identifier);
+                if (touchData) {
+                    const obj = touchData.object;
+                    obj.scale.divideScalar(1.1);
+
+                    // Check if over a zone
+                    const zone = getDropZoneUnder(obj);
+
+                    if (zone) {
+                        // מצב 1: איזור הסל (נבלע ונעול)
+                        if (zone.userData.isBasketZone) {
+                            if (canFit(obj, zone)) {
+                                // Correct! נבלע לתוך הסל - לא יוצא יותר
+                                absorbIntoBasket(obj, zone);
+                                zone.userData.objectsInside.push(obj); // הוספה למערך
+                                obj.userData.locked = true;
+                                obj.userData.draggable = false;
+                                obj.userData.inBasket = true;
+                                score++;
+                                updateScore();
+                                playSound(correctSound);
+
+                                if (score === TOTAL_OBJECTS) {
+                                    setTimeout(victory, 500);
+                                }
+                            } else {
+                                // גדול מדי לסל - חזור למקור + error sound
+                                returnToOrigin(obj);
+                                playSound(errorSound);
+                            }
+                        }
+                        // מצב 2: איזור השוואה (ירוק - אפשר להוציא)
+                        else if (zone.userData.isComparisonZone) {
+                            snapToZone(obj, zone);
+                            obj.userData.inComparisonZone = true;
+                        }
+                    } else {
+                        // לא מעל שום איזור - חזור למטה
+                        returnToOrigin(obj);
+                        obj.userData.inComparisonZone = false;
+                    }
+
+                    // Reset all zone highlights
+                    dropZones.forEach(z => {
+                        if (z.material.opacity !== 0) {
+                            z.material.opacity = z.userData.defaultOpacity || 0.4;
+                        }
+                    });
+
+                    touches.delete(touch.identifier);
+                }
+            }
+        }
+
+        // ============= MOUSE HANDLERS =============
+        function onMouseDown(event) {
+            event.preventDefault();
+            resetIdleTimer();
+
+            const mousePos = getMousePosition(event);
+            const intersects = getIntersects(mousePos);
+
+            for (let intersect of intersects) {
+                const obj = intersect.object;
+                // אם החפץ נעול (בתוך הסל) - אי אפשר לגרור
+                if (obj.userData.draggable && !obj.userData.locked && obj.visible) {
+                    mouseData = {
+                        object: obj,
+                        offset: intersect.point.sub(obj.position)
+                    };
+                    obj.scale.multiplyScalar(1.1);
+                    break;
+                }
+            }
+        }
+
+        function onMouseMove(event) {
+            event.preventDefault();
+            if (mouseData) {
+                resetIdleTimer();
+
+                const mousePos = getMousePosition(event);
+                const worldPos = screenToWorld(mousePos);
+
+                if (worldPos) {
+                    mouseData.object.position.x = worldPos.x - mouseData.offset.x;
+                    mouseData.object.position.y = worldPos.y - mouseData.offset.y;
+                    mouseData.object.position.z = worldPos.z - mouseData.offset.z;
+
+                    // Highlight drop zones
+                    highlightNearbyZone(mouseData.object);
+                }
+            }
+        }
+
+        function onMouseUp(event) {
+            event.preventDefault();
+            if (mouseData) {
+                resetIdleTimer();
+
+                const obj = mouseData.object;
+                obj.scale.divideScalar(1.1);
+
+                // Check if over a zone
+                const zone = getDropZoneUnder(obj);
+
+                if (zone) {
+                    // מצב 1: איזור הסל (נבלע ונעול)
+                    if (zone.userData.isBasketZone) {
+                        if (canFit(obj, zone)) {
+                            // Correct! נבלע לתוך הסל - לא יוצא יותר
+                            absorbIntoBasket(obj, zone);
+                            zone.userData.objectsInside.push(obj); // הוספה למערך
+                            obj.userData.locked = true;
+                            obj.userData.draggable = false;
+                            obj.userData.inBasket = true;
+                            score++;
+                            updateScore();
+                            playSound(correctSound);
+
+                            if (score === TOTAL_OBJECTS) {
+                                setTimeout(victory, 500);
+                            }
+                        } else {
+                            // גדול מדי לסל - חזור למקור + error sound
+                            returnToOrigin(obj);
+                            playSound(errorSound);
+                        }
+                    }
+                    // מצב 2: איזור השוואה (ירוק - אפשר להוציא)
+                    else if (zone.userData.isComparisonZone) {
+                        snapToZone(obj, zone);
+                        obj.userData.inComparisonZone = true;
+                    }
+                } else {
+                    // לא מעל שום איזור - חזור למטה
+                    returnToOrigin(obj);
+                    obj.userData.inComparisonZone = false;
+                }
+
+                // Reset all zone highlights
+                dropZones.forEach(z => {
+                    if (z.material.opacity !== 0) {
+                        z.material.opacity = z.userData.defaultOpacity || 0.4;
+                    }
+                });
+
+                mouseData = null;
+            }
+        }
+
+        function getMousePosition(event) {
+            return new THREE.Vector2(
+                (event.clientX / window.innerWidth) * 2 - 1,
+                -(event.clientY / window.innerHeight) * 2 + 1
+            );
+        }
+
+        // ============= HELPER FUNCTIONS =============
+        function getTouchPosition(touch) {
+            return new THREE.Vector2(
+                (touch.clientX / window.innerWidth) * 2 - 1,
+                -(touch.clientY / window.innerHeight) * 2 + 1
+            );
+        }
+
+        function getIntersects(touchPos) {
+            raycaster.setFromCamera(touchPos, camera);
+            return raycaster.intersectObjects(objects, false);
+        }
+
+        function screenToWorld(screenPos) {
+            raycaster.setFromCamera(screenPos, camera);
+            const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+            const target = new THREE.Vector3();
+            raycaster.ray.intersectPlane(plane, target);
+            return target;
+        }
+
+        function getDropZoneUnder(obj) {
+            let closestZone = null;
+            let closestDistance = Infinity;
+
+            // מחפשים את האיזור הכי קרוב
+            for (let zone of dropZones) {
+                const distance = new THREE.Vector2(
+                    obj.position.x - zone.position.x,
+                    obj.position.z - zone.position.z
+                ).length();
+
+                // בדיקת סף מרחק לפי סוג האיזור
+                const threshold = zone.userData.isBasketZone ? 2.5 : 2.0;
+
+                if (distance < threshold && distance < closestDistance) {
+                    closestDistance = distance;
+                    closestZone = zone;
+                }
+            }
+
+            return closestZone;
+        }
+
+        function highlightNearbyZone(obj) {
+            dropZones.forEach(zone => {
+                // רק איזורי השוואה מקבלים highlight (לא איזורי סל)
+                if (zone.userData.isComparisonZone) {
+                    const distance = new THREE.Vector2(
+                        obj.position.x - zone.position.x,
+                        obj.position.z - zone.position.z
+                    ).length();
+
+                    if (distance < 2) {
+                        zone.material.opacity = 0.6;
+                    } else {
+                        zone.material.opacity = zone.userData.defaultOpacity;
+                    }
+                }
+            });
+        }
+
+        function canFit(obj, zone) {
+            return obj.userData.sizeLevel <= zone.userData.sizeLevel;
+        }
+
+        function snapToZone(obj, zone) {
+            obj.position.x = zone.position.x;
+            obj.position.y = zone.position.y + 1;
+            obj.position.z = zone.position.z;
+        }
+
+        function absorbIntoBasket(obj, zone) {
+            const startPos = obj.position.clone();
+            const startScale = obj.scale.clone();
+            const endPos = new THREE.Vector3(zone.position.x, zone.position.y - 1, zone.position.z);
+            const duration = 800;
+            const startTime = Date.now();
+
+            function animateAbsorb() {
+                const elapsed = Date.now() - startTime;
+                const t = Math.min(elapsed / duration, 1);
+                const easeT = easeInQuad(t);
+
+                // תנועה פנימה
+                obj.position.lerpVectors(startPos, endPos, easeT);
+
+                // כיווץ
+                const scale = 1 - (easeT * 0.7);
+                obj.scale.set(
+                    startScale.x * scale,
+                    startScale.y * scale,
+                    startScale.z * scale
+                );
+
+                // דהייה
+                obj.traverse((child) => {
+                    if (child.isMesh && child.material) {
+                        child.material.opacity = 1 - easeT;
+                        child.material.transparent = true;
+                    }
+                });
+
+                if (t < 1) {
+                    requestAnimationFrame(animateAbsorb);
+                } else {
+                    // הסתרת החפץ לגמרי
+                    obj.visible = false;
+                }
+            }
+
+            animateAbsorb();
+        }
+
+        function easeInQuad(t) {
+            return t * t;
+        }
+
+        function returnToOrigin(obj) {
+            const startPos = obj.position.clone();
+            const endPos = obj.userData.originalPosition;
+            const duration = 500;
+            const startTime = Date.now();
+
+            function animateReturn() {
+                const elapsed = Date.now() - startTime;
+                const t = Math.min(elapsed / duration, 1);
+                const easeT = easeOutElastic(t);
+
+                obj.position.lerpVectors(startPos, endPos, easeT);
+
+                if (t < 1) {
+                    requestAnimationFrame(animateReturn);
+                }
+            }
+
+            animateReturn();
+        }
+
+        function easeOutElastic(t) {
+            const p = 0.3;
+            return Math.pow(2, -10 * t) * Math.sin((t - p / 4) * (2 * Math.PI) / p) + 1;
+        }
+
+        function updateScore() {
+            document.getElementById('score').textContent = `ניקוד: ${score}/${TOTAL_OBJECTS}`;
+        }
+
+        // ============= GAME FLOW =============
+        function victory() {
+            playSound(victorySound);
+            showVictoryMessage();
+            playFireworks();
+
+            setTimeout(() => {
+                reset();
+            }, VICTORY_DELAY);
+        }
+
+        function showVictoryMessage() {
+            const msg = document.getElementById('victory-message');
+            msg.style.display = 'block';
+            setTimeout(() => {
+                msg.style.display = 'none';
+            }, VICTORY_DELAY);
+        }
+
+        function reset() {
+            score = 0;
+            updateScore();
+
+            // Reset objects
+            objects.forEach(obj => {
+                obj.userData.locked = false;
+                obj.userData.draggable = true;
+                obj.userData.inBasket = false;
+                obj.userData.inComparisonZone = false;
+                obj.visible = true;
+
+                const baseScale = obj.userData.sizeLevel === SIZE.SMALL ? 0.5 :
+                                  obj.userData.sizeLevel === SIZE.MEDIUM ? 0.75 : 1.0;
+                obj.scale.setScalar(baseScale);
+
+                // Reset material opacity
+                obj.traverse((child) => {
+                    if (child.isMesh && child.material) {
+                        child.material.opacity = 1;
+                        child.material.transparent = false;
+                    }
+                });
+            });
+
+            // Reset zones
+            dropZones.forEach(zone => {
+                if (zone.userData.objectsInside) {
+                    zone.userData.objectsInside = []; // נקה את המערך
+                }
+                if (zone.userData.defaultOpacity !== undefined) {
+                    zone.material.opacity = zone.userData.defaultOpacity;
+                }
+            });
+
+            // Randomize positions
+            randomizeObjectPositions();
+
+            // Clear touches and mouse
+            touches.clear();
+            mouseData = null;
+
+            // Restart idle timer
+            resetIdleTimer();
+
+            // Hide fireworks
+            document.getElementById('fireworks-canvas').style.display = 'none';
+        }
+
+        function resetIdleTimer() {
+            clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                reset();
+            }, IDLE_TIMEOUT);
+        }
+
+        // ============= FIREWORKS =============
+        function playFireworks() {
+            const canvas = document.getElementById('fireworks-canvas');
+            canvas.style.display = 'block';
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            const particles = [];
+            const colors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff'];
+
+            function createFirework(x, y) {
+                const color = colors[Math.floor(Math.random() * colors.length)];
+                for (let i = 0; i < 50; i++) {
+                    const angle = (Math.PI * 2 * i) / 50;
+                    const velocity = 2 + Math.random() * 3;
+                    particles.push({
+                        x: x,
+                        y: y,
+                        vx: Math.cos(angle) * velocity,
+                        vy: Math.sin(angle) * velocity,
+                        life: 1.0,
+                        color: color
+                    });
+                }
+            }
+
+            // Create multiple fireworks
+            for (let i = 0; i < 8; i++) {
+                setTimeout(() => {
+                    createFirework(
+                        Math.random() * canvas.width,
+                        Math.random() * canvas.height * 0.6
+                    );
+                }, i * 300);
+            }
+
+            function animateFireworks() {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                for (let i = particles.length - 1; i >= 0; i--) {
+                    const p = particles[i];
+                    p.x += p.vx;
+                    p.y += p.vy;
+                    p.vy += 0.1; // gravity
+                    p.life -= 0.01;
+
+                    if (p.life <= 0) {
+                        particles.splice(i, 1);
+                        continue;
+                    }
+
+                    ctx.fillStyle = p.color;
+                    ctx.globalAlpha = p.life;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                ctx.globalAlpha = 1;
+
+                if (particles.length > 0) {
+                    requestAnimationFrame(animateFireworks);
+                }
+            }
+
+            animateFireworks();
+        }
+
+        // ============= ANIMATION LOOP =============
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // Animate baskets (bobbing + glow)
+            baskets.forEach((basket) => {
+                basket.position.y = basket.userData.baseY + Math.sin(time * 2 + basket.userData.glowPhase) * 0.1;
+
+                basket.traverse((child) => {
+                    if (child.isMesh && child.material.emissive) {
+                        child.material.emissiveIntensity = 0.3 + Math.sin(time * 3 + basket.userData.glowPhase) * 0.2;
+                    }
+                });
+            });
+
+            // Camera movement (סיבוב עדין סביב המרכז)
+            if (camera && camera.userData) {
+                const radius = 15; // מרחק המצלמה מהמרכז
+                const angleX = Math.sin(time * 0.3) * 0.15; // זווית אופקית
+                const angleY = Math.sin(time * 0.4) * 0.1; // זווית אנכית
+
+                // חישוב מיקום המצלמה בקואורדינטות ספריות
+                camera.position.x = radius * Math.sin(angleX);
+                camera.position.y = 8 + Math.sin(time * 0.5) * 0.3;
+                camera.position.z = radius * Math.cos(angleX);
+
+                camera.lookAt(0, 0, 0); // תמיד מסתכל על המרכז
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // ============= WINDOW RESIZE =============
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // ============= START GAME =============
+        init();
+    </script>
+</body>
+</html>
